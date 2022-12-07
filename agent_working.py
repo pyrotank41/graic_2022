@@ -1,12 +1,21 @@
 
 import numpy as np
+import argparse
+import time
 
 import carla
 from enum import Enum
 from queue import PriorityQueue
 import numpy as np
+from math import sqrt
 
 import matplotlib.pyplot as plt
+import math
+import threading
+
+flag = 0
+
+
 
 def prune_path(path):
         def point(p):
@@ -33,6 +42,7 @@ def prune_path(path):
 
         return np.array(pruned_path)
 
+plot_shown = False
 def plot(path, grid, start, goal, obstacle_occupancy, tvec, scale):
     
     global plot_shown
@@ -42,6 +52,11 @@ def plot(path, grid, start, goal, obstacle_occupancy, tvec, scale):
     grid_x_y = grid_x_y/scale + tvec.reshape(2,1).astype(np.int16)
     start = np.array(start)/scale + tvec
     goal = np.array(goal)/scale + tvec
+    
+    # if obstacle_occupancy is not None:
+    #     obstacle_occupancy_x_y = obstacle_occupancy/scale + tvec
+    #     for i in obstacle_occupancy_x_y:
+    #         plt.plot(i[0], i[1], 'o', color='red')
 
     plt.scatter(grid_x_y[0], grid_x_y[1], s=5, color='k', alpha=.5)
     plt.plot(start[0], start[1], 'x')
@@ -52,6 +67,7 @@ def plot(path, grid, start, goal, obstacle_occupancy, tvec, scale):
     plt.ylabel('y')
     plt.pause(0.001)
     
+
 def scaled_points_on_grid(points, scale): 
     return np.floor(points * scale).astype(int)
 
@@ -138,6 +154,16 @@ def add_padding(grid, padding):
                 grid[p[0], p[1]] = 1
             except IndexError:
                 pass
+
+    # step = [(1,0), (-1,0), (0,1), (0,-1), (1,1), (1,-1), (-1,1), (-1,-1)]
+    # for p in range(padding):
+    #     for i in range(occupanct_grids_xy.shape[1]):
+    #         for s in step:
+    #             try:
+    #                 if grid[occupanct_grids_xy[0, i] + s[0]*p, occupanct_grids_xy[1, i] + s[1]*p] == 0:
+    #                     grid[occupanct_grids_xy[0, i] + s[0]*p, occupanct_grids_xy[1, i] + s[1]*p] = 1
+    #             except IndexError:
+    #                 pass
     
     return grid
 
@@ -189,18 +215,11 @@ def plan(current_state, waypoint, left_boundary, right_boundary, obstacles_cente
     # creating the grid and populating it with obsticles
     grid_shape = (np.ceil(np.array(max)*scale)).astype(int)
     grid = np.zeros(grid_shape)
-    try:
-        grid[grid_left_lane_points[:, 0], grid_left_lane_points[:, 1]] = 1
-    except: pass
-    try: 
-        grid[grid_right_lane_points[:, 0], grid_right_lane_points[:, 1]] = 1
-    except: pass
-    try:
-        grid[grid_waypoint[0], grid_waypoint[1]] = 6 # any value other than 1 is considered not an obsticle, this is purely for visualization
-    except: pass
-    try: 
-        grid[grid_current_position[0], grid_current_position[1]] = 2 # same as above
-    except: pass
+    grid[grid_left_lane_points[:, 0], grid_left_lane_points[:, 1]] = 1
+    grid[grid_right_lane_points[:, 0], grid_right_lane_points[:, 1]] = 1
+    grid[grid_waypoint[0], grid_waypoint[1]] = 6 # any value other than 1 is considered not an obsticle, this is purely for visualization
+    grid[grid_current_position[0], grid_current_position[1]] = 2 # same as above
+
     grid  = add_padding(grid, padding*scale)
 
     obstacle_occupancies = None
@@ -214,6 +233,10 @@ def plan(current_state, waypoint, left_boundary, right_boundary, obstacles_cente
                 if point[0] >= 0 and point[1] >= 0 and point[0] < grid_shape[0] and point[1] < grid_shape[1]:
                     grid[point[0], point[1]] = 1
 
+      
+    
+    # print(grid)
+
     path, cost = a_star(grid, heuristic, 
                             (grid_current_position[0], grid_current_position[1]) , 
                             (grid_waypoint[0], grid_waypoint[1]))
@@ -221,7 +244,7 @@ def plan(current_state, waypoint, left_boundary, right_boundary, obstacles_cente
         path = np.array(path)
         pruned_path = prune_path(path)
 
-        # Transforming path to the original coordinate system
+        #transforming path to the original coordinate system
         pruned_path_t = (pruned_path / scale) + min_transform + current_position
         plot(pruned_path, grid, grid_current_position, grid_waypoint, obstacle_occupancies,  tvec, scale)
         
@@ -229,6 +252,8 @@ def plan(current_state, waypoint, left_boundary, right_boundary, obstacles_cente
 
     else: 
         return None
+
+
 
 class Action(Enum):
     """
@@ -346,6 +371,7 @@ def a_star(grid, h, start, goal):
 def heuristic(position, goal_position):
     return np.linalg.norm(np.array(position) - np.array(goal_position))
 
+
 class Agent():
     
     def __init__(self, vehicle=None):
@@ -355,10 +381,104 @@ class Agent():
         self.prev_error_vel = 0
         plt.ion()
         plt.show()
-        self.blacklist_human_id = []
-        self.timer = 0
+
+    def execute(self, currentPose, targetPose):
+        """
+            This function takes the current state of the vehicle and
+            the target state to compute low-level control input to the vehicle
+            Inputs:
+                currentPose: ModelState, the current state of vehicle
+                targetPose: The desired state of the vehicle
+        """
+
+        #currentEuler = currentPose[1]
+        curr_x = currentPose[0][0]
+        curr_y = currentPose[0][1]
+        curr_theta = currentPose[1][1]
+        curr_theta = (curr_theta+360)%360
         
-        self.vehicle_state = 1 #1: Drive , -1: Stop
+        target_x = targetPose[0]
+        target_y = targetPose[1]
+        target_v = targetPose[2]
+        target_theta =  np.arctan2(target_y-curr_y, target_x-curr_x)*180/np.pi
+        target_theta = (target_theta+360)%360
+
+        k_s = 0.1
+        k_ds = 1
+        k_n = 0.038
+        k_theta = 0.25
+        decelerate_when_steering = 15
+
+        # compute errors
+        dx = target_x - curr_x
+        dy = target_y - curr_y
+
+        xError = (dx) * np.cos(currentPose[1][1]) + (dy) * np.sin(currentPose[1][1])
+        yError = -(dx) * np.sin(currentPose[1][1]) + (dy) * np.cos(currentPose[1][1])
+        
+        curr_v = np.sqrt(currentPose[2][0]**2 + currentPose[2][1]**2)
+
+        thetaError = target_theta - curr_theta
+        #print(curr_theta, target_theta, thetaError)
+
+        p = (k_n * yError)
+        d = (k_theta * thetaError)
+        delta = p + d
+
+
+        #target_v = max(0,target_v - decelerate_when_steering*abs(delta))
+        #print(delta, target_v)
+
+
+        vError = target_v - curr_v
+
+
+        # error_vel = target_v - curr_v
+        # vp = 0.1
+        # vd = 1
+        # throttle = vp * error_vel + vd * (error_vel - self.prev_error_vel)
+        # throttle = max(-1, min(1, throttle))
+        # self.prev_error_vel = error_vel
+
+        delta = k_n * yError
+        print(f"delta: {delta}")
+        delta = max(-1, min(1, delta))
+        #delta = (delta + 1) / 2
+        #delmin = 
+        # Checking if the vehicle need to stop
+        if target_v >= 0:
+            v = xError * k_s + vError * k_ds
+            print("v:", v)
+            if vError < 0:
+                print("vError:", vError)
+                
+                throttle = 0
+                brake = 0.5
+                print("=====Deccelerating======")
+
+            else:
+                if(curr_v >= 15):
+                    throttle = 0
+                    brake = 1.0
+                else:
+                    throttle = v * 0.1
+                    brake = 0
+                print("************Execcuting Go Condition************")
+                print(f"throttle: {throttle}, delta: {delta}")
+            return [throttle,delta, brake]
+        #
+            #Send computed control input to vehicle
+        #if target_v >= 0:
+        
+        #v = max(0, min(1, v))
+
+
+        #print(f"dela {delta}, d: {d}, theta_error: {thetaError}")
+        #return [throttle,delta] # [speed, steering_angle]
+
+        # else:
+        #     print("************Execcuting Stop Condition************")
+        #     return self.stop()
 
     def get_throttle_and_steering(self, currentPose, targetPose):
         
@@ -370,37 +490,35 @@ class Agent():
         target_vel = targetPose[2]
         target_x = targetPose[0]
         target_y = targetPose[1]
+        #print("current_x, current_y, target_x, target_y", current_x, current_y, target_x, target_y)
+
 
         target_yaw = np.rad2deg(np.arctan2(target_y-current_y,target_x-current_x))
-
+        #print(target_yaw)
+        #print("target_yaw before", target_yaw)
         error_yaw =  target_yaw - current_yaw # this one was working 
-   
+        # error_yaw =  current_yaw - target_yaw
         
         if (error_yaw < -90.0 or error_yaw > 90.0):
 
             #error_yaw = error_yaw % 90
             if (error_yaw > 180):
-                print("1")
                 error_yaw = 360 - error_yaw
                 error_yaw = 180 - error_yaw
                 error_yaw = -error_yaw
             elif (error_yaw < -180):
-                print("2")
                 error_yaw = 360 + error_yaw
                 error_yaw = 180 - error_yaw
             elif (error_yaw > 90):
-                print("3")
                 error_yaw = 180 - error_yaw
             elif (error_yaw < -90):
-                print("4")
                 error_yaw = 180 + error_yaw
                 error_yaw = -error_yaw
+                
             else:
-                print("5")
                 error_yaw = error_yaw % 90
             print("Corrected error_yaw")
 
-        # Another way of fixing error_yaw 
         # if target_yaw >= 0 and current_yaw < 0:
         #     error_yaw = min(target_yaw - current_yaw, target_yaw - (current_yaw+360))
         # elif target_yaw < 0 and current_yaw >= 0:
@@ -409,13 +527,14 @@ class Agent():
         #     error_yaw = target_yaw - current_yaw
 
         error_vel = target_vel - currernt_v
+        # print("error_yaw", error_yaw)
 
         sp = 0.01
-        sd = 0.01
+        sd = 0.0
         steering = sp * error_yaw + sd * (error_yaw - self.prev_error_yaw)
         print("steering, current_yaw, target_yaw, error_yaw", steering, current_yaw, target_yaw, error_yaw)
 
-        # --------------------------------------------
+    # --------------------------------------------
         vp = 0.03
         vd = 0
         throttle = vp * error_vel + vd * (error_vel - self.prev_error_vel)
@@ -452,7 +571,10 @@ class Agent():
                             they defines the track boundary of the next 20 meters.
         Return: carla.VehicleControl()
         """
-       
+        global flag
+        if (flag == 0):
+            print("List of waypoints", waypoints)
+            flag = 1
         # Actions to take during each simulation step
         # Feel Free to use carla API; however, since we already provide info to you, using API will only add to your delay time
         # Currently the timeout is set to 10s
@@ -472,7 +594,10 @@ class Agent():
         waypoint = [waypoints[0][0], waypoints[0][1]]
         # print("boundary_lane_markers:", waypoint)
 
-        target_speed = 18
+
+        # # refState = self.decisionModule.get_ref_state(currState, obstacleList,
+        #                                               waypoint, boundary_lane_markers)
+        target_speed = 15
         resp = plan(currPose, 
                         waypoint,
                         boundary_left, 
@@ -481,41 +606,25 @@ class Agent():
 
         if resp is not None:
             target_x, target_y = resp[0], resp[1]
-
+            target_speed = 15
         else:
             target_x, target_y = waypoint[0], waypoint[1]
-
+            target_speed = 15
 
         target_state = [target_x, target_y, target_speed]
         waypoint_state = [waypoint[0], waypoint[1], target_speed]
 
-        b = 0.0
+
         throttle, steer = self.get_throttle_and_steering(currPose, target_state)
         # throttle, steer, brake = self.execute(currPose, target_state)
         # given target state, compute control input
+
+
+        # speed, angle = self.get_angle_and_speed(currState, target_state)
         
-        for obstacle in filtered_obstacles:
-            attr = obstacle.attributes
-            if obstacle.id not in self.blacklist_human_id:
-                # print(attr)
-                if "gender" in attr:
-                    # print("###################found you suckerrrrrrr")
-                    self.blacklist_human_id.append(obstacle.id)
-                    #b = 1.0
-                    self.vehicle_state = -1
 
         control = carla.VehicleControl()
-
-        if self.vehicle_state == -1:
-            if np.sqrt(currPose[2][0]**2 + currPose[2][1]**2) < 0.01:
-                self.vehicle_state = 1
-            
-            control.brake = 0.02
-
-
-        if self.vehicle_state == 1:
-            control.steer = steer
-            control.throttle = throttle
-            control.brake = b
-
+        control.steer = steer
+        control.throttle = throttle
+        # control.brake = brake
         return control
